@@ -1,0 +1,16 @@
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Recordings the script makes. Everyone records their own reference whistle
+# with --record, so there's nothing to share here -- and they're large.
+waka_reference.wav
+waka_attempt.wav
+
+# The song is commercial music and isn't redistributed from this repo.
+# Supply your own copy (see the README).
+*.mp3
