@@ -74,6 +74,30 @@ Other flags: `--verbose` prints the live match cost while you whistle,
 `--test FILE` runs the detector over an audio file, and `--no-motor` skips
 Bluetooth so you can work on the audio side alone.
 
+## Also here: `whistle_motor_control.py`
+
+A simpler, earlier script that drives the same motor from whistle *pitch* rather
+than melody — no reference recording, no matching:
+
+| You whistle | Motor does |
+| --- | --- |
+| high | spins clockwise |
+| low | spins counterclockwise |
+| in the middle | flips direction every 0.2 s |
+| nothing | stops |
+
+It takes the loudest frequency in each audio block straight from an FFT and
+buckets it, which is about as simple as pitch control gets — worth reading first
+if the DTW matching in the main script is a lot to take in at once.
+
+Its `LOW_PITCH_MAX_HZ` (800) and `HIGH_PITCH_MIN_HZ` (1600) are **placeholders**,
+not tuned to anyone's voice. Run `waka_motor_control.py --check` and read the
+frequency range it reports for your whistling, then set them from that.
+
+```bash
+python whistle_motor_control.py
+```
+
 ## Tuning
 
 Everything worth adjusting is a named constant at the top of the script.
