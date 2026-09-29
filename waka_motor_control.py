@@ -40,6 +40,10 @@ First time -- record your reference:
 Then drop your MP3 in this folder and run:
     python waka_motor_control.py
 
+While it's listening, press 'p' to pause (it goes quiet and still, and stops
+whatever it's playing, but stays connected to the motor), 'p' again to resume,
+and 'q' to stop.
+
 If it won't trigger, don't guess -- measure. This records one attempt and tells
 you the match cost and what to do about it:
     python waka_motor_control.py --check
@@ -53,7 +57,9 @@ Requires: pip install numpy sounddevice soundfile legoeducation
 """
 
 import argparse
+import os
 import queue
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -80,6 +86,10 @@ MOTOR_SPEED = 60            # percent, 0-100
 SPIN_FOR_WHOLE_SONG = True  # True = spin until the MP3 finishes
 SPIN_SECONDS = 5.0          # ...otherwise, spin this long (also the fallback
                             # if no song file is found)
+
+# --- Keys you can press while it's listening ------------------------------
+PAUSE_KEY = "p"  # stop/resume listening, without disconnecting the motor
+QUIT_KEY = "q"   # stop cleanly, same as Ctrl+C
 
 # --- Audio framing --------------------------------------------------------
 RATE = 44100
@@ -133,10 +143,11 @@ MAX_NOTE_WEIGHT = 3.0  # limit on how much more a short note counts than a long 
 REST_WEIGHT = 0.25     # weight of a silent reference frame (a note frame averages 1)
 MAX_NOTE_COST = 1.25   # semitones; a reference note matched worse than this on average...
 NOTE_PENALTY = 1.0     # ...adds this much per semitone beyond it to the cost
-MATCH_THRESHOLD = 1.0  # avg DTW cost (semitones) at or below = match. Raising
-                       # this makes it easier to set off -- and easier to set
-                       # off by accident. Re-check with --check that a WRONG
-                       # tune still misses after you change it.
+MATCH_THRESHOLD = 0.75  # avg DTW cost (semitones) at or below = match. Higher
+                        # is easier to set off -- and easier to set off by
+                        # accident; lower demands a closer whistle. After
+                        # changing it, use --check both ways: that your real
+                        # whistle still fires, and a WRONG tune still misses.
 MIN_VOICED_RATIO = 0.6  # window must have at least this share of the reference's
                         # whistled frames
 COOLDOWN_S = 2.0        # ignore new matches this long after one fires
@@ -539,6 +550,56 @@ class Reaction:
 
 # --------------------------------------------------------------------- modes
 
+class Keyboard:
+    """Reads single keypresses without waiting for Enter and without blocking
+    the listening loop -- get() returns None when nothing has been pressed.
+
+    If the terminal can't be put into that mode (input is piped, or there's no
+    terminal at all), `enabled` stays False and get() simply never reports a
+    key, so the script still runs -- just without the hotkeys."""
+
+    def __init__(self):
+        self.enabled = False
+        self._restore = None
+        self._read = lambda: None
+
+    def __enter__(self):
+        if os.name == "nt":
+            try:
+                import msvcrt
+                self._read = lambda: msvcrt.getwch() if msvcrt.kbhit() else None
+                self.enabled = True
+            except Exception:
+                pass
+        else:
+            try:
+                import select
+                import termios
+                import tty
+                fd = sys.stdin.fileno()
+                saved = termios.tcgetattr(fd)
+                tty.setcbreak(fd)  # deliver keys as typed, but keep Ctrl+C working
+                self._restore = lambda: termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+                self._read = lambda: (sys.stdin.read(1)
+                                      if select.select([sys.stdin], [], [], 0)[0]
+                                      else None)
+                self.enabled = True
+            except Exception:
+                pass
+        return self
+
+    def get(self):
+        try:
+            key = self._read()
+        except Exception:
+            return None
+        return key.lower() if key else None
+
+    def __exit__(self, *exc):
+        if self._restore:
+            self._restore()
+
+
 def announce(cost, when):
     print(f"\n*** Waka Waka recognized at {when} (cost {cost:.2f}) ***")
 
@@ -698,23 +759,54 @@ def run_microphone(matcher, motor, direction, song_path, verbose=False):
             n = max(1, int(CALIBRATION_SECONDS * RATE / HOP))
             tracker.calibrate([read().copy() for _ in range(n)])
 
-            print("Listening for Waka Waka (Ctrl+C to stop)\n")
-            while True:
-                pitch = tracker.process(read())
-                now = time.monotonic()
-                reaction.tick(now)
+            with Keyboard() as keys:
+                if keys.enabled:
+                    print(f"Listening for Waka Waka  "
+                          f"('{PAUSE_KEY}' = pause, '{QUIT_KEY}' = quit)\n")
+                else:
+                    print("Listening for Waka Waka (Ctrl+C to stop)\n")
 
-                cost = matcher.update(pitch, now)
-                status = f"whistle {pitch:5.1f} (MIDI)" if pitch is not None else "..."
-                if verbose and matcher.last_best is not None:
-                    status += f"   best cost {matcher.last_best:.2f}"
-                print(f"\r{status:<50}", end="", flush=True)
+                paused = False
+                while True:
+                    key = keys.get()
+                    if key == QUIT_KEY:
+                        print("\nStopped.")
+                        break
+                    if key == PAUSE_KEY:
+                        paused = not paused
+                        if paused:
+                            # Stop whatever it's in the middle of, too --
+                            # pausing should mean it goes quiet and still.
+                            reaction.stop()
+                            print(f"\r{'PAUSED -- not listening. Press ' + PAUSE_KEY + ' to resume.':<50}",
+                                  end="", flush=True)
+                        else:
+                            # Forget what was heard across the pause, so half a
+                            # tune from before can't combine with half after.
+                            matcher.mute_until(time.monotonic())
+                            print(f"\r{'Listening again.':<50}", end="", flush=True)
 
-                if cost is not None:
-                    announce(cost, time.strftime("%H:%M:%S"))
-                    ends = reaction.fire(now)
-                    # Don't listen to our own speakers while the song plays.
-                    matcher.mute_until(ends + COOLDOWN_S)
+                    # Keep draining the microphone either way: it stops the
+                    # queue growing, and keeps the noise floor current so
+                    # resuming doesn't need another calibration.
+                    pitch = tracker.process(read())
+                    if paused:
+                        continue
+
+                    now = time.monotonic()
+                    reaction.tick(now)
+
+                    cost = matcher.update(pitch, now)
+                    status = f"whistle {pitch:5.1f} (MIDI)" if pitch is not None else "..."
+                    if verbose and matcher.last_best is not None:
+                        status += f"   best cost {matcher.last_best:.2f}"
+                    print(f"\r{status:<50}", end="", flush=True)
+
+                    if cost is not None:
+                        announce(cost, time.strftime("%H:%M:%S"))
+                        ends = reaction.fire(now)
+                        # Don't listen to our own speakers while the song plays.
+                        matcher.mute_until(ends + COOLDOWN_S)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:

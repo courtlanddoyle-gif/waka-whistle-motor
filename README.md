@@ -65,6 +65,17 @@ python waka_motor_control.py --check    # how close was that? no motor, just the
 python waka_motor_control.py            # listen for real
 ```
 
+While it's listening, these keys work without pressing Enter:
+
+| Key | Does what |
+| --- | --- |
+| `p` | Pause — stops listening and stops whatever is playing, but stays connected to the motor. Press again to resume. |
+| `q` | Stop cleanly (same as Ctrl+C). |
+
+Resuming forgets whatever was heard before the pause, so half a tune from either
+side can't combine into a false match. The microphone keeps being read while
+paused, so the noise floor stays current and resuming is instant.
+
 `--record` reports whether the recording is clipping, how many notes it found,
 and whether it leaves enough margin to be matched again. `--check` records one
 attempt and prints its match cost against the reference, with advice on whether
